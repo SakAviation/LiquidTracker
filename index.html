@@ -8,6 +8,10 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%2316a34a'/%3E%3Cg transform='translate(32 32) rotate(45) scale(1.45)'%3E%3Cpath fill='%23fff' d='M0-15c1.3 0 2 1.4 2 3.2V-4l12 6.2v2.6L2 1.6v7.3l3.6 2.7v2.2L0 12.6l-5.6 1.2v-2.2L-2 8.9V1.6l-12 3.2V2.2L-2-4v-7.8C-2-13.6-1.3-15 0-15z'/%3E%3C/g%3E%3C/svg%3E">
+<link rel="preconnect" href="https://api.airplanes.live" crossorigin>
+<link rel="preconnect" href="https://api.adsb.lol" crossorigin>
+<link rel="preconnect" href="https://opendata.adsb.fi" crossorigin>
+<link rel="preconnect" href="https://server.arcgisonline.com" crossorigin>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <style>
 :root{
@@ -193,6 +197,7 @@ body.far .ap:not(.home){padding:3px}body.far .ap:not(.home) b{display:none}
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 "use strict";
+const LS={get(k,d){try{const v=JSON.parse(localStorage.getItem('lt.'+k));return v??d}catch(e){return d}},set(k,v){try{localStorage.setItem('lt.'+k,JSON.stringify(v))}catch(e){}}};
 const $=id=>document.getElementById(id);
 const PATH='M0-15c1.3 0 2 1.4 2 3.2V-4l12 6.2v2.6L2 1.6v7.3l3.6 2.7v2.2L0 12.6l-5.6 1.2v-2.2L-2 8.9V1.6l-12 3.2V2.2L-2-4v-7.8C-2-13.6-1.3-15 0-15z';
 const KTI=[11.36005,104.92125];
@@ -203,7 +208,7 @@ const EMG={'7700':'Emergency','7600':'Radio failure','7500':'Hijack code'};
 function toast(t,ms=2600){const e=$('toast');e.textContent=t;e.classList.add('on');clearTimeout(e._t);e._t=setTimeout(()=>e.classList.remove('on'),ms)}
 
 /* ================= map ================= */
-const map=L.map('map',{zoomControl:false,worldCopyJump:true,minZoom:2,zoomSnap:.25,wheelPxPerZoomLevel:90,inertiaDeceleration:2400}).setView(KTI,8);
+const map=L.map('map',{zoomControl:false,worldCopyJump:true,minZoom:2,zoomSnap:.25,wheelPxPerZoomLevel:90,inertiaDeceleration:2400}).setView(...(v=>v?[[v[0],v[1]],v[2]]:[KTI,8])(LS.get('view',null)));
 L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:19,maxNativeZoom:18,attribution:'Tiles © Esri · Data: airplanes.live · adsb.lol · OpenSky'}).addTo(map);
 const labels=L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',{maxZoom:19,maxNativeZoom:18,opacity:.85}).addTo(map);
 
@@ -226,29 +231,50 @@ AIRPORTS.forEach(a=>{const[iata,,,,lat,lon,home]=a;
 const far=()=>document.body.classList.toggle('far',map.getZoom()<5);map.on('zoomend',far);far();
 
 /* ================= data ================= */
-const RELAYS=[u=>u,u=>'https://api.allorigins.win/raw?url='+encodeURIComponent(u),u=>'https://corsproxy.io/?url='+encodeURIComponent(u)];
-function getJSON(u){return Promise.any(RELAYS.map((r,i)=>new Promise((res,rej)=>setTimeout(()=>{
-  const c=new AbortController(),t=setTimeout(()=>c.abort(),7000);
-  fetch(r(u),{signal:c.signal,cache:'no-store'}).then(x=>{if(!x.ok)throw new Error('HTTP '+x.status);return x.json()}).then(j=>{clearTimeout(t);res(j)}).catch(e=>{clearTimeout(t);rej(e)})},i*700))))}
+/* direct first, then two free relays. The route that worked last time is tried first next time */
+const RELAYS=[u=>u,u=>'https://corsproxy.io/?url='+encodeURIComponent(u),u=>'https://api.allorigins.win/raw?url='+encodeURIComponent(u)];
+const ROUTE=LS.get('route',{}),COOL={},live=new Set();
+function getJSON(u,host){let done=false;const pref=ROUTE[host]||0,order=[pref,...[0,1,2].filter(i=>i!==pref)];
+  return Promise.any(order.map((ri,k)=>new Promise((res,rej)=>{
+    const go=()=>{if(done)return rej(new Error('skip'));const c=new AbortController(),t=setTimeout(()=>c.abort(),k?6500:4500);live.add(c);
+      fetch(RELAYS[ri](u),{signal:c.signal,cache:'no-store'})
+        .then(x=>{if(x.status===429){const e=new Error('rate limit');e.rl=1;throw e}if(!x.ok)throw new Error('HTTP '+x.status);return x.json()})
+        .then(j=>{done=true;if(ROUTE[host]!==ri){ROUTE[host]=ri;LS.set('route',ROUTE)}res(j)}).catch(rej).finally(()=>{clearTimeout(t);live.delete(c)})};
+    k?setTimeout(go,k*900):go()})))}
+function abortAll(){for(const c of live)c.abort();live.clear()}
 function normReadsb(a){if(a.lat==null||a.lon==null)return null;const gnd=a.alt_baro==='ground';
   return{hex:a.hex,cs:(a.flight||'').trim(),reg:a.r||'',type:a.t||'',desc:a.desc||'',lat:a.lat,lon:a.lon,alt:gnd?0:(typeof a.alt_baro==='number'?a.alt_baro:a.alt_geom??null),gnd,
     gs:a.gs??null,trk:a.track??a.true_heading??null,vr:a.baro_rate??a.geom_rate??null,sq:a.squawk||''}}
 function normOpensky(s){if(s[5]==null||s[6]==null)return null;
   return{hex:s[0],cs:(s[1]||'').trim(),reg:'',type:'',desc:'',country:s[2],lat:s[6],lon:s[5],alt:s[8]?0:(s[7]!=null?s[7]*3.28084:null),gnd:!!s[8],
     gs:s[9]!=null?s[9]*1.94384:null,trk:s[10],vr:s[11]!=null?s[11]*196.85:null,sq:s[14]||''}}
+/* free community networks (same data format) — all asked at once */
+const NEAR=[
+  ['airplanes.live',(la,lo,r)=>'https://api.airplanes.live/v2/point/'+la+'/'+lo+'/'+r],
+  ['adsb.lol',(la,lo,r)=>'https://api.adsb.lol/v2/point/'+la+'/'+lo+'/'+r],
+  ['adsb.fi',(la,lo,r)=>'https://opendata.adsb.fi/api/v2/lat/'+la+'/lon/'+lo+'/dist/'+r]];
 const STAT={};
-function source(name,u,norm,pick){STAT[name]='waiting';
-  return getJSON(u).then(j=>{const raw=pick(j);if(!Array.isArray(raw))throw new Error('bad data');const l=raw.map(norm).filter(Boolean);STAT[name]=l.length+' planes';if(!l.length)throw new Error('empty');return{l,name}})
-    .catch(e=>{if(STAT[name]==='waiting')STAT[name]='failed';throw e})}
-async function fetchView(){
+function source(name,u,norm,pick){
+  if(COOL[name]>Date.now()){STAT[name]='resting (busy)';return Promise.reject(new Error('cool'))}
+  STAT[name]='waiting';
+  return getJSON(u,name).then(j=>{const raw=pick(j);if(!Array.isArray(raw))throw new Error('bad data');const l=raw.map(norm).filter(Boolean);STAT[name]=l.length+' planes';COOL[name]=0;return{l,name}})
+    .catch(e=>{const rl=e.rl||(e.errors||[]).some(x=>x&&x.rl);
+      if(STAT[name]==='waiting')STAT[name]=rl?'busy, resting 30s':'failed';if(rl)COOL[name]=Date.now()+30000;throw e})}
+/* show the first answer straight away, then merge in the others as they arrive */
+function merge(base,extra){const m=new Map(base.map(d=>[d.hex,d]));
+  for(const d of extra){const o=m.get(d.hex);if(!o)m.set(d.hex,d);else{if(!o.reg&&d.reg)o.reg=d.reg;if(!o.type&&d.type){o.type=d.type;o.desc=o.desc||d.desc}}}return[...m.values()]}
+function fetchView(onMore){
   const b=map.getBounds(),c=map.getCenter(),z=map.getZoom(),jobs=[];
-  if(z>=5){const r=Math.min(250,Math.ceil(c.distanceTo(b.getNorthEast())/1852)),p='/point/'+c.lat.toFixed(3)+'/'+c.lng.toFixed(3)+'/'+r,pk=j=>j.ac||j.aircraft;
-    jobs.push(source('airplanes.live','https://api.airplanes.live/v2'+p,normReadsb,pk),source('adsb.lol','https://api.adsb.lol/v2'+p,normReadsb,pk))}
-  let w=b.getWest(),e=b.getEast();if(e-w>=360){w=-180;e=180}
-  jobs.push(source('OpenSky','https://opensky-network.org/api/states/all?lamin='+Math.max(-85,b.getSouth()).toFixed(2)+'&lomin='+Math.max(-180,w).toFixed(2)+'&lamax='+Math.min(85,b.getNorth()).toFixed(2)+'&lomax='+Math.min(180,e).toFixed(2),normOpensky,j=>j.states||[]));
-  try{const r=await Promise.any(jobs);$('src').textContent='via '+r.name;return r.l}
-  catch(err){if(Object.values(STAT).some(v=>v==='0 planes')){$('src').textContent='No planes here';return[]}$('src').textContent='Offline';throw err}
-}
+  const r=Math.max(10,Math.min(250,Math.ceil(c.distanceTo(b.getNorthEast())/1852))),la=c.lat.toFixed(3),lo=L.Util.wrapNum(c.lng,[-180,180],true).toFixed(3),pk=j=>j.ac||j.aircraft;
+  for(const[n,f]of NEAR)jobs.push(source(n,f(la,lo,r),normReadsb,pk));
+  if(z<7){let w=b.getWest(),e=b.getEast();if(e-w>=360){w=-180;e=180}
+    jobs.push(source('OpenSky','https://opensky-network.org/api/states/all?lamin='+Math.max(-85,b.getSouth()).toFixed(2)+'&lomin='+Math.max(-180,w).toFixed(2)+'&lamax='+Math.min(85,b.getNorth()).toFixed(2)+'&lomax='+Math.min(180,e).toFixed(2),normOpensky,j=>j.states||[]))}
+  let acc=null,names=[];
+  const label=()=>$('src').textContent='via '+names[0]+(names.length>1?' +'+(names.length-1):'');
+  return new Promise((res,rej)=>{let left=jobs.length,empty=false;
+    jobs.forEach(j=>j.then(r=>{if(!r.l.length){empty=true;return}
+        names.push(r.name);if(!acc){acc=r.l;label();res(acc)}else{acc=merge(acc,r.l);label();onMore(acc)}})
+      .catch(()=>{}).finally(()=>{if(--left===0&&!acc){if(empty){$('src').textContent='No planes here';res([])}else{$('src').textContent='Offline';rej(new Error('all failed'))}}}))})}
 
 /* ================= planes (smooth gliding) ================= */
 function altColor(ft){if(ft==null)return'#8e8e93';
@@ -257,8 +283,8 @@ function altColor(ft){if(ft==null)return'#8e8e93';
 const planes=new Map();let sel=null,trail=null,busy=false,fails=0;
 function iconFor(d,isNew){const cls='pl'+(isNew?' in':'')+(EMG[d.sq]?' emg':'')+(d.hex===sel?' sel':'');
   return L.divIcon({className:'',iconSize:[0,0],html:'<div class="'+cls+'"><svg viewBox="-16 -16 32 32" style="transform:rotate('+(d.trk||0)+'deg)"><path fill="'+(d.gnd?'#8e8e93':altColor(d.alt))+'" d="'+PATH+'"/></svg></div>'})}
-function render(list){
-  const now=performance.now(),seen=new Set(),view=map.getBounds().pad(.15);let shown=0;
+function render(list,age=0){
+  const now=performance.now()-age,seen=new Set(),view=map.getBounds().pad(.15);let shown=0;
   for(const d of list){if(!d.hex)continue;seen.add(d.hex);
     let p=planes.get(d.hex);if(!p){p={trail:[]};planes.set(d.hex,p)}
     p.d=d;p.t=now;p.base=[d.lat,d.lon];p.trail.push([d.lat,d.lon]);if(p.trail.length>150)p.trail.shift();
@@ -281,12 +307,19 @@ function render(list){
     p.m.setLatLng([p.base[0]+dla*180/Math.PI,p.base[1]+dlo*180/Math.PI])}
   setTimeout(()=>requestAnimationFrame(glide),120)})();
 
-async function tick(){if(busy||document.hidden)return;busy=true;
-  try{render(await fetchView());fails=0;$('dot').className='dot live'}
-  catch(e){if(++fails===1)toast('Can’t reach live flight data. Retrying…');$('dot').className='dot err'}
-  busy=false}
-let timer;function schedule(){clearInterval(timer);timer=setInterval(tick,map.getZoom()>=5?6000:15000)}
-let mv;map.on('moveend',()=>{clearTimeout(mv);mv=setTimeout(()=>{tick();schedule()},350)});
+let gen=0,retry,saved=0;
+function save(list){if(Date.now()-saved<20000)return;saved=Date.now();
+  LS.set('last',{t:Date.now(),l:list.slice(0,700).map(d=>[d.hex,d.cs,d.reg,d.type,+d.lat.toFixed(4),+d.lon.toFixed(4),d.alt==null?null:Math.round(d.alt),d.gnd?1:0,d.gs==null?null:Math.round(d.gs),d.trk==null?null:Math.round(d.trk),d.vr,d.sq])})}
+async function tick(){if(document.hidden)return;
+  if(busy){abortAll()}busy=true;const g=++gen;clearTimeout(retry);
+  try{let cur;const l=await fetchView(m=>{cur=m;if(g===gen){render(m);save(m)}});if(g!==gen)return;
+    render(cur||l);save(cur||l);fails=0;$('dot').className='dot live'}
+  catch(e){if(g!==gen)return;fails++;if(fails===2)toast('Can’t reach live flight data. Retrying…');$('dot').className='dot err';
+    retry=setTimeout(tick,Math.min(20000,2000*fails))}   /* quick retries: 2s, 4s, 6s… */
+  finally{if(g===gen)busy=false}}
+let timer;function schedule(){clearInterval(timer);timer=setInterval(()=>{if(!busy)tick()},map.getZoom()>=7?5000:map.getZoom()>=5?8000:20000)}
+let mv;map.on('moveend',()=>{const c=map.getCenter();LS.set('view',[+c.lat.toFixed(4),+c.lng.toFixed(4),map.getZoom()]);
+  clearTimeout(mv);mv=setTimeout(()=>{tick();schedule()},300)});
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)tick()});
 
 /* ================= flight brief ================= */
@@ -372,6 +405,9 @@ function toggle(btn,layer){const on=btn.getAttribute('aria-pressed')!=='true';bt
 $('bAp').onclick=()=>toggle($('bAp'),apLayer);$('bLbl').onclick=()=>toggle($('bLbl'),labels);
 $('status').onclick=()=>toast(Object.entries(STAT).map(([k,v])=>k+': '+v).join(' · ')||'Nothing loaded yet',5000);
 
+(function(){const c=LS.get('last',null);if(!c||!c.l||Date.now()-c.t>10*60e3)return;
+  render(c.l.map(a=>({hex:a[0],cs:a[1],reg:a[2],type:a[3],desc:'',lat:a[4],lon:a[5],alt:a[6],gnd:!!a[7],gs:a[8],trk:a[9],vr:a[10],sq:a[11]})),Math.min(55e3,Date.now()-c.t));
+  $('src').textContent='Last seen, updating…'})();
 tick();schedule();
 </script>
 </body>

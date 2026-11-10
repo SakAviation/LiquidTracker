@@ -232,14 +232,20 @@ const far=()=>document.body.classList.toggle('far',map.getZoom()<5);map.on('zoom
 
 /* ================= data ================= */
 /* direct first, then two free relays. The route that worked last time is tried first next time */
-const RELAYS=[u=>u,u=>'https://corsproxy.io/?url='+encodeURIComponent(u),u=>'https://api.allorigins.win/raw?url='+encodeURIComponent(u)];
-const ROUTE=LS.get('route',{}),COOL={},live=new Set();
-function getJSON(u,host){let done=false;const pref=ROUTE[host]||0,order=[pref,...[0,1,2].filter(i=>i!==pref)];
+/* YOUR OWN RELAY (Cloudflare Worker). Paste its address between the quotes, e.g. 'https://liquidtracker.yourname.workers.dev'
+   You can also test one without editing: open the page with ?relay=https://... at the end of the link (it's remembered). */
+let WORKER='';
+(()=>{const q=new URLSearchParams(location.search).get('relay');if(q)LS.set('relay',q.replace(/\/+$/,''));WORKER=(WORKER||LS.get('relay','')).replace(/\/+$/,'')})();
+const WMAP=[['https://api.airplanes.live/','/live/'],['https://api.adsb.lol/','/lol/'],['https://opendata.adsb.fi/api/','/fi/'],['https://opensky-network.org/api/','/os/']];
+const viaWorker=u=>{for(const[a,b]of WMAP)if(u.startsWith(a))return WORKER+b+u.slice(a.length);return u};
+const RELAYS=[...(WORKER?[viaWorker]:[]),u=>u,u=>'https://corsproxy.io/?url='+encodeURIComponent(u),u=>'https://api.allorigins.win/raw?url='+encodeURIComponent(u)];
+const ROUTE=LS.get(WORKER?'routeW':'route',{}),COOL={},live=new Set();
+function getJSON(u,host){let done=false;const pref=ROUTE[host]||0,order=[pref,...RELAYS.map((_,i)=>i).filter(i=>i!==pref)];
   return Promise.any(order.map((ri,k)=>new Promise((res,rej)=>{
     const go=()=>{if(done)return rej(new Error('skip'));const c=new AbortController(),t=setTimeout(()=>c.abort(),k?6500:4500);live.add(c);
       fetch(RELAYS[ri](u),{signal:c.signal,cache:'no-store'})
         .then(x=>{if(x.status===429){const e=new Error('rate limit');e.rl=1;throw e}if(!x.ok)throw new Error('HTTP '+x.status);return x.json()})
-        .then(j=>{done=true;if(ROUTE[host]!==ri){ROUTE[host]=ri;LS.set('route',ROUTE)}res(j)}).catch(rej).finally(()=>{clearTimeout(t);live.delete(c)})};
+        .then(j=>{done=true;if(ROUTE[host]!==ri&&RELAYS[ri]){ROUTE[host]=ri;LS.set(WORKER?'routeW':'route',ROUTE)}res(j)}).catch(rej).finally(()=>{clearTimeout(t);live.delete(c)})};
     k?setTimeout(go,k*900):go()})))}
 function abortAll(){for(const c of live)c.abort();live.clear()}
 function normReadsb(a){if(a.lat==null||a.lon==null)return null;const gnd=a.alt_baro==='ground';
